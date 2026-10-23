@@ -1,0 +1,38 @@
+[
+  {
+    "transactionId": "TXN-8001",
+    "requestId": "REQ-8001",
+    "sequenceNumber": 6,
+    "accountId": "ACC-EDGE-1",
+    "transactionType": "CREDIT",
+    "amount": 1000.00,
+    "currency": "USD"
+  },
+  {
+    "transactionId": "TXN-8002",
+    "requestId": "REQ-8002",
+    "sequenceNumber": 7,
+    "accountId": "ACC-EDGE-1",
+    "transactionType": "DEBIT",
+    "amount": 250.00,
+    "currency": "USD"
+  },
+  {
+    "transactionId": "TXN-8003",
+    "requestId": "REQ-8003",
+    "sequenceNumber": 8,
+    "accountId": "ACC-EDGE-1",
+    "transactionType": "REVERSAL",
+    "amount": 250.00,
+    "currency": "USD"
+  },
+  {
+    "transactionId": "TXN-8003",
+    "requestId": "REQ-8003-RETRY",
+    "sequenceNumber": 8,
+    "accountId": "ACC-EDGE-1",
+    "transactionType": "REVERSAL",
+    "amount": 250.00,
+    "currency": "USD"
+  }
+]

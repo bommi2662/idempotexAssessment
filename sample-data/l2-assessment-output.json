@@ -1,0 +1,98 @@
+{
+  "batchId": "BATCH-L2-OFFICIAL",
+  "totalReceived": 6,
+  "processedCount": 3,
+  "duplicateCount": 1,
+  "pendingSequenceCount": 1,
+  "retryPendingCount": 1,
+  "failedCount": 1,
+  "executionTimeMs": 42,
+  "accountBalances": {
+    "ACC-201": 85.00,
+    "ACC-203": 500.00
+  },
+  "results": [
+    {
+      "transactionId": "TXN-2002",
+      "requestId": "REQ-2",
+      "accountId": "ACC-201",
+      "sequenceNumber": 2,
+      "transactionType": "DEBIT",
+      "amount": 40.00,
+      "currency": "USD",
+      "status": "PENDING_SEQUENCE",
+      "failureType": "SEQUENCE_OUT_OF_ORDER",
+      "errorMessage": "Out of order sequence: sequence 2 received before previous sequence completed. Buffered in pending store.",
+      "duplicate": false,
+      "notes": "Initially buffered as PENDING_SEQUENCE. Automatically cascade-executed when TXN-2001 (seq 1) landed, bringing ACC-201 balance to 60.00."
+    },
+    {
+      "transactionId": "TXN-2001",
+      "requestId": "REQ-1",
+      "accountId": "ACC-201",
+      "sequenceNumber": 1,
+      "transactionType": "CREDIT",
+      "amount": 100.00,
+      "currency": "USD",
+      "status": "PROCESSED",
+      "currentBalance": 100.00,
+      "duplicate": false,
+      "notes": "Processed successfully. Triggered automatic cascade execution of buffered sequence 2 (TXN-2002)."
+    },
+    {
+      "transactionId": "TXN-2002",
+      "requestId": "REQ-2-DUP",
+      "accountId": "ACC-201",
+      "sequenceNumber": 2,
+      "transactionType": "DEBIT",
+      "amount": 40.00,
+      "currency": "USD",
+      "status": "DUPLICATE",
+      "currentBalance": 60.00,
+      "duplicate": true,
+      "errorMessage": "Duplicate request detected: transactionId [TXN-2002] was already PROCESSED under requestId [REQ-2]",
+      "notes": "Deduplicated. Suppressed double-debit; ledger balance preserved at 60.00."
+    },
+    {
+      "transactionId": "TXN-2003",
+      "requestId": "REQ-3",
+      "accountId": "ACC-201",
+      "sequenceNumber": 3,
+      "transactionType": "CREDIT",
+      "amount": 25.00,
+      "currency": "USD",
+      "status": "PROCESSED",
+      "currentBalance": 85.00,
+      "duplicate": false,
+      "notes": "Sequential execution successful. Final ACC-201 balance updated to 85.00."
+    },
+    {
+      "transactionId": "TXN-2004",
+      "requestId": "REQ-4",
+      "accountId": "ACC-202",
+      "sequenceNumber": 4,
+      "transactionType": "DEBIT",
+      "amount": -10.00,
+      "currency": "USD",
+      "status": "FAILED",
+      "failureType": "VALIDATION_ERROR",
+      "errorMessage": "amount must be greater than 0",
+      "duplicate": false,
+      "notes": "Validation failure isolated cleanly. Batch processing continued uninterrupted."
+    },
+    {
+      "transactionId": "TXN-2005",
+      "requestId": "REQ-5",
+      "accountId": "ACC-203",
+      "sequenceNumber": 5,
+      "transactionType": "CREDIT",
+      "amount": 500.00,
+      "currency": "USD",
+      "status": "PROCESSED",
+      "currentBalance": 500.00,
+      "retryCount": 2,
+      "duplicate": false,
+      "notes": "Simulated transient downstream glitch on attempt 1 (status RETRY_PENDING). Recovered on retry attempt 2 to PROCESSED. ACC-203 balance updated to 500.00 without duplicate side effects."
+    }
+  ]
+}
