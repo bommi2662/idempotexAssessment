@@ -135,9 +135,10 @@ Per **L2-FR-08** and **L2-FR-09**:
 In high-throughput enterprise platforms, multiple worker threads may ingest duplicate requests simultaneously.
 
 ### Thread-Safety & Synchronized Execution Boundary
-1. **Account-Level Lock Striping:** `TransactionEngine.process` synchronizes on the account identifier `(request.getAccountId()).intern()`. Requests for account `ACC-201` are sequenced cleanly, while requests for `ACC-202` and `ACC-203` run fully concurrently across worker threads.
-2. **Programmatic Transaction Demarcation:** Using Spring's `TransactionTemplate`, database transactions begin *inside* the lock and commit *before* the lock is released. When a concurrent thread acquires the lock, it immediately sees the committed database rows.
+1. **Coordinated Channel & Sequence Locks:** `TransactionEngine.process` coordinates on the stream channel coordination boundary (`SequenceManager.DEFAULT_CHANNEL`) using a thread-safe `ConcurrentHashMap` lock store. This ensures sequence evaluation, watermark progression, and waterfall cascade drains are strictly serialized and cannot race across concurrent worker threads.
+2. **Programmatic Transaction Demarcation:** Using Spring's `TransactionTemplate`, database transactions begin *inside* the lock boundary and commit *before* the lock is released. When a concurrent thread acquires the lock, it immediately sees the committed database rows.
 3. **Optimistic Locking:** The `AccountLedger` entity uses `@Version private Long version;` to prevent lost updates.
+4. **Watermark Commit Timing:** Sequence watermarks advance strictly *after* successful ledger commits, preventing subsequent transactions from executing out of order if an earlier sequence experiences a transient failure.
 
 ---
 

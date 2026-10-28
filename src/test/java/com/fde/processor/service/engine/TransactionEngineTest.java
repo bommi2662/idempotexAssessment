@@ -170,4 +170,41 @@ class TransactionEngineTest {
         // Ledger should not be created
         assertThat(accountLedgerRepository.findById("ACC-400")).isEmpty();
     }
+
+    @Test
+    @DisplayName("Should explicitly report missing predecessor sequences when out-of-order gap occurs (Section 9.5 Option A)")
+    void testMissingSequenceReporting() {
+        TransactionRequestDto req = new TransactionRequestDto(
+                "TXN-GAP-3", "REQ-GAP-3", 3L, "ACC-GAP",
+                TransactionType.CREDIT, new BigDecimal("100.00"), "USD", null, false
+        );
+
+        TransactionResponseDto resp = transactionEngine.process(req);
+
+        assertThat(resp.getStatus()).isEqualTo(TransactionStatus.PENDING_SEQUENCE);
+        assertThat(resp.getErrorMessage()).contains("Missing predecessor sequence(s): [1, 2]");
+    }
+
+    @Test
+    @DisplayName("Should detect duplicate request even while original request is still in PENDING_SEQUENCE status")
+    void testDuplicateDetectionWhilePending() {
+        // Step 1: Submit out-of-order sequence 2 (buffered as PENDING_SEQUENCE)
+        TransactionRequestDto req1 = new TransactionRequestDto(
+                "TXN-PEND-DUP", "REQ-P1", 2L, "ACC-PEND",
+                TransactionType.CREDIT, new BigDecimal("75.00"), "USD", null, false
+        );
+        TransactionResponseDto resp1 = transactionEngine.process(req1);
+        assertThat(resp1.getStatus()).isEqualTo(TransactionStatus.PENDING_SEQUENCE);
+
+        // Step 2: Retry with same transactionId while still pending
+        TransactionRequestDto req2 = new TransactionRequestDto(
+                "TXN-PEND-DUP", "REQ-P2-RETRY", 2L, "ACC-PEND",
+                TransactionType.CREDIT, new BigDecimal("75.00"), "USD", null, false
+        );
+        TransactionResponseDto resp2 = transactionEngine.process(req2);
+
+        assertThat(resp2.getStatus()).isEqualTo(TransactionStatus.DUPLICATE);
+        assertThat(resp2.isDuplicate()).isTrue();
+        assertThat(resp2.getErrorMessage()).contains("is currently PENDING_SEQUENCE");
+    }
 }

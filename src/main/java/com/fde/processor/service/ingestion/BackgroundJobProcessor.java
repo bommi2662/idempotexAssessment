@@ -2,6 +2,7 @@ package com.fde.processor.service.ingestion;
 
 import com.fde.processor.model.dto.TransactionRequestDto;
 import com.fde.processor.model.dto.TransactionResponseDto;
+import com.fde.processor.model.enums.FailureType;
 import com.fde.processor.service.engine.TransactionEngine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +31,15 @@ public class BackgroundJobProcessor {
             return CompletableFuture.completedFuture(response);
         } catch (Exception e) {
             log.error("Unhandled exception in background worker for transaction [{}]", request.getTransactionId(), e);
-            throw e;
+            TransactionResponseDto errorResp = TransactionResponseDto.failed(
+                    request.getTransactionId(),
+                    request.getRequestId(),
+                    request.getAccountId(),
+                    request.getSequenceNumber(),
+                    FailureType.SYSTEM_ERROR,
+                    "Worker execution error: " + e.getMessage()
+            );
+            return CompletableFuture.completedFuture(errorResp);
         }
     }
 }

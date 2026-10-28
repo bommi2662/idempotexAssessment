@@ -28,9 +28,14 @@
 - **Maven 3.8+** (or use the system Maven)
 
 ### 1. Build and Run the Application
-Open a terminal in the project root directory (`D:\Naga`):
+Open a terminal in the project root directory:
 
 ```bash
+# Using Maven Wrapper:
+./mvnw clean package
+./mvnw spring-boot:run
+
+# Or with system Maven:
 mvn clean package
 mvn spring-boot:run
 ```

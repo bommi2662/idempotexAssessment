@@ -107,6 +107,7 @@ public class SimulationController {
      * Resets the entire transaction database to a clean state.
      */
     @PostMapping("/reset")
+    @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<Map<String, String>> resetState() {
         sequenceManager.reset();
         auditLogEntryRepository.deleteAll();

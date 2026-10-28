@@ -2,10 +2,13 @@ package com.fde.processor.repository;
 
 import com.fde.processor.model.entity.TransactionRecord;
 import com.fde.processor.model.enums.TransactionStatus;
+import com.fde.processor.model.enums.TransactionType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
@@ -28,6 +31,9 @@ public interface TransactionRecordRepository extends JpaRepository<TransactionRe
 
     @Query("SELECT r.status, COUNT(r) FROM TransactionRecord r GROUP BY r.status")
     List<Object[]> countGroupByStatus();
+
+    @Query("SELECT COALESCE(SUM(r.amount), 0) FROM TransactionRecord r WHERE r.status = :status AND r.transactionType = :type")
+    BigDecimal sumAmountByStatusAndType(@Param("status") TransactionStatus status, @Param("type") TransactionType type);
 
     List<TransactionRecord> findTop200ByOrderByCreatedAtDesc();
 }

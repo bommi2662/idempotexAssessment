@@ -12,6 +12,7 @@ import com.fde.processor.repository.TransactionRecordRepository;
 import com.fde.processor.service.audit.AuditService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Isolation;
@@ -20,7 +21,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class TransactionEngine {
@@ -33,6 +36,7 @@ public class TransactionEngine {
     private final SequenceManager sequenceManager;
     private final AuditService auditService;
     private final TransactionTemplate transactionTemplate;
+    private final ConcurrentHashMap<String, Object> streamLocks = new ConcurrentHashMap<>();
 
     public TransactionEngine(TransactionRecordRepository transactionRecordRepository,
                              AccountLedgerRepository accountLedgerRepository,
@@ -52,10 +56,20 @@ public class TransactionEngine {
      * Ingests and processes a transaction request safely under duplicate, concurrency, and out-of-order conditions.
      */
     public TransactionResponseDto process(TransactionRequestDto request) {
-        String lock = (request.getAccountId() != null ? request.getAccountId() : "GLOBAL").intern();
+        try {
+            MDC.put("transactionId", request.getTransactionId() != null ? request.getTransactionId() : "-");
+            MDC.put("requestId", request.getRequestId() != null ? request.getRequestId() : "-");
 
-        synchronized (lock) {
-            return transactionTemplate.execute(status -> doProcess(request));
+            // Synchronize on the stream coordination channel so sequence evaluation,
+            // watermark progression, and waterfall drain are strictly serialized and race-free.
+            Object streamLock = streamLocks.computeIfAbsent(SequenceManager.DEFAULT_CHANNEL, k -> new Object());
+
+            synchronized (streamLock) {
+                return transactionTemplate.execute(status -> doProcess(request));
+            }
+        } finally {
+            MDC.remove("transactionId");
+            MDC.remove("requestId");
         }
     }
 
@@ -64,7 +78,7 @@ public class TransactionEngine {
                 request.getTransactionId(), request.getRequestId(), request.getAccountId(),
                 request.getSequenceNumber(), request.getAmount(), request.getCurrency());
 
-        // 1. Validation check
+        // 1. Validation check (L2-FR-02)
         String validationError = validateRequest(request);
         if (validationError != null) {
             return handleValidationError(request, validationError);
@@ -101,13 +115,11 @@ public class TransactionEngine {
     public TransactionResponseDto executeTransaction(TransactionRequestDto request) {
         TransactionRecord record = getOrCreateRecord(request);
         record.setStatus(TransactionStatus.PROCESSING);
+        record.setSimulateTransientFailure(request.isSimulateTransientFailure());
         transactionRecordRepository.save(record);
 
         auditService.recordEvent(request.getTransactionId(), request.getRequestId(), request.getAccountId(),
                 TransactionStatus.RECEIVED, TransactionStatus.PROCESSING, "Transaction execution started");
-
-        // Advance stream sequence watermark
-        sequenceManager.advanceWatermark(request.getSequenceNumber());
 
         // Simulate transient failure scenario if flagged (L2-FR-08)
         if (record.isSimulateTransientFailure() && record.getRetryCount() == 0) {
@@ -131,7 +143,7 @@ public class TransactionEngine {
             return response;
         }
 
-        // Post to ledger atomically
+        // Post to ledger atomically (L2-FR-05)
         AccountLedger ledger = accountLedgerRepository.findById(request.getAccountId())
                 .orElseGet(() -> new AccountLedger(request.getAccountId(), BigDecimal.ZERO, 0L));
 
@@ -142,6 +154,9 @@ public class TransactionEngine {
         ledger.setLastProcessedSequence(request.getSequenceNumber());
         ledger.setUpdatedAt(Instant.now());
         accountLedgerRepository.save(ledger);
+
+        // Advance stream sequence watermark ONLY upon successful commit (L2-FR-07)
+        sequenceManager.advanceWatermark(request.getSequenceNumber());
 
         // Update transaction record
         record.setStatus(TransactionStatus.PROCESSED);
@@ -179,7 +194,7 @@ public class TransactionEngine {
     }
 
     /**
-     * Drains consecutive buffered out-of-order transactions in sequence order.
+     * Drains consecutive buffered out-of-order transactions in sequence order without bypassing failure simulation.
      */
     private void drainBufferedSequences(Long nextExpectedSequence) {
         Long currentSeq = nextExpectedSequence;
@@ -199,46 +214,25 @@ public class TransactionEngine {
                     TransactionStatus.PENDING_SEQUENCE, TransactionStatus.PROCESSING,
                     "Predecessor sequence satisfied. Releasing from buffer for processing.");
 
-            // Post to ledger
-            AccountLedger ledger = accountLedgerRepository.findById(pendingRecord.getAccountId())
-                    .orElseGet(() -> new AccountLedger(pendingRecord.getAccountId(), BigDecimal.ZERO, 0L));
+            TransactionRequestDto pendingDto = new TransactionRequestDto(
+                    pendingRecord.getTransactionId(),
+                    pendingRecord.getRequestId(),
+                    pendingRecord.getSequenceNumber(),
+                    pendingRecord.getAccountId(),
+                    pendingRecord.getTransactionType(),
+                    pendingRecord.getAmount(),
+                    pendingRecord.getCurrency(),
+                    pendingRecord.getEventTime(),
+                    pendingRecord.isSimulateTransientFailure()
+            );
 
-            BigDecimal oldBal = ledger.getBalance();
-            BigDecimal newBal = calculateNewBalance(oldBal, pendingRecord.getTransactionType(), pendingRecord.getAmount());
+            TransactionResponseDto cascadeResp = executeTransaction(pendingDto);
 
-            ledger.setBalance(newBal);
-            ledger.setLastProcessedSequence(pendingRecord.getSequenceNumber());
-            ledger.setUpdatedAt(Instant.now());
-            accountLedgerRepository.save(ledger);
-
-            pendingRecord.setStatus(TransactionStatus.PROCESSED);
-            pendingRecord.setFailureType(FailureType.NONE);
-            pendingRecord.setErrorMessage(null);
-            pendingRecord.setProcessedAt(Instant.now());
-            transactionRecordRepository.save(pendingRecord);
-
-            // Advance stream sequence watermark
-            sequenceManager.advanceWatermark(pendingRecord.getSequenceNumber());
-
-            auditService.recordEvent(pendingRecord.getTransactionId(), pendingRecord.getRequestId(), pendingRecord.getAccountId(),
-                    TransactionStatus.PROCESSING, TransactionStatus.PROCESSED,
-                    String.format("Buffered transaction completed. Applied %s %s. Balance: %s. Sequence: %d.",
-                            pendingRecord.getTransactionType(), pendingRecord.getAmount(), newBal, pendingRecord.getSequenceNumber()));
-
-            TransactionResponseDto cascadeResponse = new TransactionResponseDto();
-            cascadeResponse.setTransactionId(pendingRecord.getTransactionId());
-            cascadeResponse.setRequestId(pendingRecord.getRequestId());
-            cascadeResponse.setAccountId(pendingRecord.getAccountId());
-            cascadeResponse.setSequenceNumber(pendingRecord.getSequenceNumber());
-            cascadeResponse.setTransactionType(pendingRecord.getTransactionType());
-            cascadeResponse.setAmount(pendingRecord.getAmount());
-            cascadeResponse.setCurrency(pendingRecord.getCurrency());
-            cascadeResponse.setStatus(TransactionStatus.PROCESSED);
-            cascadeResponse.setCurrentBalance(newBal);
-            cascadeResponse.setProcessedAt(pendingRecord.getProcessedAt());
-
-            idempotencyService.recordOutcome(pendingRecord.getRequestId(), pendingRecord.getTransactionId(),
-                    TransactionStatus.PROCESSED, cascadeResponse);
+            // If the drained transaction encountered a simulated transient failure or failed, pause cascade
+            if (cascadeResp.getStatus() == TransactionStatus.RETRY_PENDING ||
+                cascadeResp.getStatus() == TransactionStatus.FAILED) {
+                break;
+            }
 
             currentSeq++;
         }
@@ -251,7 +245,7 @@ public class TransactionEngine {
         return switch (type) {
             case CREDIT -> current.add(amount);
             case DEBIT -> current.subtract(amount);
-            case REVERSAL -> current.add(amount);
+            case REVERSAL -> current.add(amount); // Reverses prior debit by refunding credit
         };
     }
 
@@ -285,32 +279,45 @@ public class TransactionEngine {
         record.setErrorMessage(error);
         transactionRecordRepository.save(record);
 
-        // Advance sequence watermark past the invalid record so that malformed records do not stop the batch
+        // Advance sequence watermark past the invalid record so malformed records do not halt the stream (L2-FR-02)
         if (request.getSequenceNumber() != null && request.getSequenceNumber() == sequenceManager.getWatermark() + 1) {
             sequenceManager.advanceWatermark(request.getSequenceNumber());
+            // Trigger cascade drain for any subsequent valid sequences waiting behind this failed record
+            drainBufferedSequences(request.getSequenceNumber() + 1);
         }
 
         auditService.recordEvent(request.getTransactionId(), request.getRequestId(), request.getAccountId(),
                 TransactionStatus.RECEIVED, TransactionStatus.FAILED, "Validation failed: " + error);
 
-        return TransactionResponseDto.failed(request.getTransactionId(), request.getRequestId(),
+        TransactionResponseDto response = TransactionResponseDto.failed(request.getTransactionId(), request.getRequestId(),
                 request.getAccountId(), request.getSequenceNumber(), FailureType.VALIDATION_ERROR, error);
+
+        idempotencyService.recordOutcome(request.getRequestId(), request.getTransactionId(),
+                TransactionStatus.FAILED, response);
+
+        return response;
     }
 
     private TransactionResponseDto bufferOutOfOrderTransaction(TransactionRequestDto request) {
         TransactionRecord record = getOrCreateRecord(request);
         record.setStatus(TransactionStatus.PENDING_SEQUENCE);
         record.setFailureType(FailureType.SEQUENCE_OUT_OF_ORDER);
+        List<Long> missing = sequenceManager.getMissingSequences(request.getSequenceNumber());
         String reason = "Out of order sequence: sequence " + request.getSequenceNumber() +
-                " received before previous sequence completed. Buffered in pending store.";
+                " received before previous sequence completed. Missing predecessor sequence(s): " + missing + ". Buffered in pending store.";
         record.setErrorMessage(reason);
         transactionRecordRepository.save(record);
 
         auditService.recordEvent(request.getTransactionId(), request.getRequestId(), request.getAccountId(),
                 TransactionStatus.RECEIVED, TransactionStatus.PENDING_SEQUENCE, reason);
 
-        return TransactionResponseDto.pendingSequence(request.getTransactionId(), request.getRequestId(),
+        TransactionResponseDto response = TransactionResponseDto.pendingSequence(request.getTransactionId(), request.getRequestId(),
                 request.getAccountId(), request.getSequenceNumber(), reason);
+
+        idempotencyService.recordOutcome(request.getRequestId(), request.getTransactionId(),
+                TransactionStatus.PENDING_SEQUENCE, response);
+
+        return response;
     }
 
     private TransactionResponseDto handleObsoleteSequence(TransactionRequestDto request) {
@@ -320,11 +327,22 @@ public class TransactionEngine {
         String msg = String.format("Request sequence %d is less than or equal to current stream sequence watermark %d.",
                 request.getSequenceNumber(), sequenceManager.getWatermark());
 
+        TransactionRecord record = getOrCreateRecord(request);
+        record.setStatus(TransactionStatus.DUPLICATE);
+        record.setFailureType(FailureType.NONE);
+        record.setErrorMessage(msg);
+        transactionRecordRepository.save(record);
+
         auditService.recordEvent(request.getTransactionId(), request.getRequestId(), request.getAccountId(),
                 TransactionStatus.RECEIVED, TransactionStatus.DUPLICATE, msg);
 
-        return TransactionResponseDto.duplicate(request.getTransactionId(), request.getRequestId(),
+        TransactionResponseDto response = TransactionResponseDto.duplicate(request.getTransactionId(), request.getRequestId(),
                 request.getAccountId(), request.getSequenceNumber(), ledger.getBalance(), msg);
+
+        idempotencyService.recordOutcome(request.getRequestId(), request.getTransactionId(),
+                TransactionStatus.DUPLICATE, response);
+
+        return response;
     }
 
     private void recordDuplicateArrival(TransactionRequestDto request, TransactionResponseDto duplicateResponse) {

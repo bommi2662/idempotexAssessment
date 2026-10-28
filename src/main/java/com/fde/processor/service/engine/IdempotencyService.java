@@ -6,6 +6,8 @@ import com.fde.processor.model.dto.TransactionResponseDto;
 import com.fde.processor.model.entity.IdempotencyKey;
 import com.fde.processor.model.entity.TransactionRecord;
 import com.fde.processor.model.enums.TransactionStatus;
+import com.fde.processor.model.entity.AccountLedger;
+import com.fde.processor.repository.AccountLedgerRepository;
 import com.fde.processor.repository.IdempotencyKeyRepository;
 import com.fde.processor.repository.TransactionRecordRepository;
 import org.slf4j.Logger;
@@ -14,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -24,13 +27,16 @@ public class IdempotencyService {
 
     private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final TransactionRecordRepository transactionRecordRepository;
+    private final AccountLedgerRepository accountLedgerRepository;
     private final ObjectMapper objectMapper;
 
     public IdempotencyService(IdempotencyKeyRepository idempotencyKeyRepository,
                               TransactionRecordRepository transactionRecordRepository,
+                              AccountLedgerRepository accountLedgerRepository,
                               ObjectMapper objectMapper) {
         this.idempotencyKeyRepository = idempotencyKeyRepository;
         this.transactionRecordRepository = transactionRecordRepository;
+        this.accountLedgerRepository = accountLedgerRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -44,15 +50,14 @@ public class IdempotencyService {
         Optional<IdempotencyKey> keyOpt = idempotencyKeyRepository.findByIdempotencyKey(requestId);
         if (keyOpt.isPresent()) {
             IdempotencyKey key = keyOpt.get();
-            if (key.getStatus() == TransactionStatus.PROCESSED || key.getStatus() == TransactionStatus.DUPLICATE) {
-                log.info("Idempotency hit by requestId [{}] -> Status: {}", requestId, key.getStatus());
-                Optional<TransactionResponseDto> cached = deserializeCachedResponse(key.getResponsePayload());
-                cached.ifPresent(c -> {
-                    c.setStatus(TransactionStatus.DUPLICATE);
-                    c.setDuplicate(true);
-                    c.setErrorMessage("Idempotent replay: requestId [" + requestId + "] was previously processed");
-                });
-                return cached;
+            log.info("Idempotency key hit by requestId [{}] -> Status: {}", requestId, key.getStatus());
+            Optional<TransactionResponseDto> cached = deserializeCachedResponse(key.getResponsePayload());
+            if (cached.isPresent()) {
+                TransactionResponseDto dto = cached.get();
+                dto.setStatus(TransactionStatus.DUPLICATE);
+                dto.setDuplicate(true);
+                dto.setErrorMessage("Idempotent replay: requestId [" + requestId + "] previously recorded with status: " + key.getStatus());
+                return Optional.of(dto);
             }
         }
 
@@ -60,16 +65,27 @@ public class IdempotencyService {
         Optional<TransactionRecord> txnOpt = transactionRecordRepository.findByTransactionId(transactionId);
         if (txnOpt.isPresent()) {
             TransactionRecord record = txnOpt.get();
-            if (record.getStatus() == TransactionStatus.PROCESSED) {
-                log.info("Duplicate business transaction hit by transactionId [{}] (Original requestId: {})",
-                        transactionId, record.getRequestId());
+            if (record.getStatus() == TransactionStatus.PROCESSED ||
+                record.getStatus() == TransactionStatus.PENDING_SEQUENCE ||
+                record.getStatus() == TransactionStatus.RETRY_PENDING) {
+
+                log.info("Duplicate business transaction hit by transactionId [{}] (Original requestId: {}, status: {})",
+                        transactionId, record.getRequestId(), record.getStatus());
+
+                BigDecimal currentBal = accountLedgerRepository.findById(record.getAccountId())
+                        .map(AccountLedger::getBalance).orElse(BigDecimal.ZERO);
+
+                String msg = record.getStatus() == TransactionStatus.PROCESSED
+                        ? "Duplicate request detected: transactionId [" + transactionId + "] was already PROCESSED under requestId [" + record.getRequestId() + "]"
+                        : "Duplicate request detected: transactionId [" + transactionId + "] is currently " + record.getStatus() + " under requestId [" + record.getRequestId() + "]";
+
                 return Optional.of(TransactionResponseDto.duplicate(
                         record.getTransactionId(),
                         requestId,
                         record.getAccountId(),
                         record.getSequenceNumber(),
-                        null,
-                        "Duplicate request detected: transactionId [" + transactionId + "] was already PROCESSED under requestId [" + record.getRequestId() + "]"
+                        currentBal,
+                        msg
                 ));
             }
         }

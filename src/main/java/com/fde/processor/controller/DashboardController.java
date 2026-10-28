@@ -48,42 +48,34 @@ public class DashboardController {
     public ResponseEntity<DashboardMetricsDto> getDashboardSummary() {
         DashboardMetricsDto dto = new DashboardMetricsDto();
 
-        List<TransactionRecord> all = transactionRecordRepository.findAll();
-        dto.setTotalReceived(all.size());
+        long total = transactionRecordRepository.count();
+        dto.setTotalReceived((int) total);
 
         Map<String, Long> statusCounts = new HashMap<>();
-        long processed = 0, duplicates = 0, pending = 0, retry = 0, failed = 0;
-        BigDecimal creditVol = BigDecimal.ZERO;
-        BigDecimal debitVol = BigDecimal.ZERO;
-
-        for (TransactionRecord r : all) {
-            String s = r.getStatus().name();
-            statusCounts.put(s, statusCounts.getOrDefault(s, 0L) + 1L);
-
-            switch (r.getStatus()) {
-                case PROCESSED -> {
-                    processed++;
-                    if (r.getTransactionType() == TransactionType.CREDIT) {
-                        creditVol = creditVol.add(r.getAmount());
-                    } else if (r.getTransactionType() == TransactionType.DEBIT) {
-                        debitVol = debitVol.add(r.getAmount());
-                    }
-                }
-                case DUPLICATE -> duplicates++;
-                case PENDING_SEQUENCE -> pending++;
-                case RETRY_PENDING -> retry++;
-                case FAILED -> failed++;
-                default -> {}
-            }
+        for (Object[] row : transactionRecordRepository.countGroupByStatus()) {
+            TransactionStatus status = (TransactionStatus) row[0];
+            Long count = (Long) row[1];
+            statusCounts.put(status.name(), count);
         }
+
+        long processed = statusCounts.getOrDefault(TransactionStatus.PROCESSED.name(), 0L);
+        long duplicates = statusCounts.getOrDefault(TransactionStatus.DUPLICATE.name(), 0L);
+        long pending = statusCounts.getOrDefault(TransactionStatus.PENDING_SEQUENCE.name(), 0L);
+        long retry = statusCounts.getOrDefault(TransactionStatus.RETRY_PENDING.name(), 0L);
+        long failed = statusCounts.getOrDefault(TransactionStatus.FAILED.name(), 0L);
+
+        BigDecimal creditVol = transactionRecordRepository.sumAmountByStatusAndType(
+                TransactionStatus.PROCESSED, TransactionType.CREDIT);
+        BigDecimal debitVol = transactionRecordRepository.sumAmountByStatusAndType(
+                TransactionStatus.PROCESSED, TransactionType.DEBIT);
 
         dto.setTotalProcessed(processed);
         dto.setTotalDuplicatesPrevented(duplicates);
         dto.setTotalPendingSequence(pending);
         dto.setTotalRetryPending(retry);
         dto.setTotalFailed(failed);
-        dto.setTotalCreditVolume(creditVol);
-        dto.setTotalDebitVolume(debitVol);
+        dto.setTotalCreditVolume(creditVol != null ? creditVol : BigDecimal.ZERO);
+        dto.setTotalDebitVolume(debitVol != null ? debitVol : BigDecimal.ZERO);
         dto.setStatusCounts(statusCounts);
         dto.setActiveAccountsCount((int) accountLedgerRepository.count());
 

@@ -47,13 +47,27 @@ public class SequenceManager {
         if (incomingSequence == expectedNext) {
             return SequenceDecision.READY_TO_PROCESS;
         } else if (incomingSequence > expectedNext) {
-            log.info("Out-of-order sequence detected. Incoming: {}, Expected: {} (Watermark: {}). Queuing as PENDING_SEQUENCE.",
-                    incomingSequence, expectedNext, watermark);
+            List<Long> missing = getMissingSequences(incomingSequence);
+            log.info("Out-of-order sequence detected. Incoming: {}, Expected: {} (Watermark: {}). Missing predecessor sequences: {}. Queuing as PENDING_SEQUENCE.",
+                    incomingSequence, expectedNext, watermark, missing);
             return SequenceDecision.OUT_OF_ORDER_PENDING;
         } else {
             log.info("Obsolete/already handled sequence [{}] (Watermark: {})", incomingSequence, watermark);
             return SequenceDecision.OBSOLETE_SEQUENCE;
         }
+    }
+
+    /**
+     * Calculates the list of missing sequences between the current watermark and the incoming sequence (L2 Section 9.5 Option A).
+     */
+    @Transactional(readOnly = true)
+    public List<Long> getMissingSequences(Long incomingSequence) {
+        long watermark = getWatermark();
+        List<Long> missing = new java.util.ArrayList<>();
+        for (long seq = watermark + 1L; seq < incomingSequence; seq++) {
+            missing.add(seq);
+        }
+        return missing;
     }
 
     @Transactional(propagation = Propagation.REQUIRED)

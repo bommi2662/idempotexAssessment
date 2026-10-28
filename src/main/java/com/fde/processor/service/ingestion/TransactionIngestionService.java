@@ -164,21 +164,32 @@ public class TransactionIngestionService {
 
                 String[] tokens = line.split(",");
                 if (tokens.length >= 6) {
-                    TransactionRequestDto dto = new TransactionRequestDto();
-                    dto.setTransactionId(tokens[0].trim());
-                    dto.setRequestId(tokens[1].trim());
-                    dto.setSequenceNumber(Long.parseLong(tokens[2].trim()));
-                    dto.setAccountId(tokens[3].trim());
-                    dto.setTransactionType(TransactionType.valueOf(tokens[4].trim().toUpperCase()));
-                    dto.setAmount(new BigDecimal(tokens[5].trim()));
+                    try {
+                        TransactionRequestDto dto = new TransactionRequestDto();
+                        dto.setTransactionId(tokens[0].trim());
+                        dto.setRequestId(tokens[1].trim());
+                        dto.setSequenceNumber(Long.parseLong(tokens[2].trim()));
+                        dto.setAccountId(tokens[3].trim());
+                        dto.setTransactionType(TransactionType.valueOf(tokens[4].trim().toUpperCase()));
+                        dto.setAmount(new BigDecimal(tokens[5].trim()));
 
-                    if (tokens.length >= 7 && !tokens[6].trim().isEmpty()) {
-                        dto.setCurrency(tokens[6].trim());
+                        if (tokens.length >= 7 && !tokens[6].trim().isEmpty()) {
+                            dto.setCurrency(tokens[6].trim());
+                        }
+                        if (tokens.length >= 8 && !tokens[7].trim().isEmpty()) {
+                            dto.setSimulateTransientFailure(Boolean.parseBoolean(tokens[7].trim()));
+                        }
+                        list.add(dto);
+                    } catch (Exception ex) {
+                        log.warn("Malformed CSV line [{}]: {}. Creating isolated invalid record.", line, ex.getMessage());
+                        TransactionRequestDto badDto = new TransactionRequestDto();
+                        badDto.setTransactionId(tokens[0].trim());
+                        badDto.setRequestId(tokens.length > 1 ? tokens[1].trim() : "MALFORMED");
+                        badDto.setAccountId(tokens.length > 3 ? tokens[3].trim() : "UNKNOWN");
+                        badDto.setSequenceNumber(-1L);
+                        badDto.setAmount(BigDecimal.valueOf(-1));
+                        list.add(badDto);
                     }
-                    if (tokens.length >= 8 && !tokens[7].trim().isEmpty()) {
-                        dto.setSimulateTransientFailure(Boolean.parseBoolean(tokens[7].trim()));
-                    }
-                    list.add(dto);
                 }
             }
         }
